@@ -1,5 +1,5 @@
 # Ground-Station-Prediction-and-Review
-## by Austin Langford
+### by Austin Langford
 
 Flight predictions compatible with this software come from [CUSF Landing Predictor 2.5](http://predict.habhub.org/).
 
