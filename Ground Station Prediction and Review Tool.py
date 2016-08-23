@@ -159,7 +159,7 @@ class MainWindow(QMainWindow,Ui_MainWindow):
 		try:													# Try to determine if this is a prediction or review based on file type
 			if(self.dataFile.split('.')[1] == 'kml'):
 				self.predictionCheckbox.setChecked(True)
-			if(self.dataFile.split('.')[1] == 'csv'):
+			if(self.dataFile.split('.')[1] == 'csv' or self.dataFile.split('.')[1] == 'txt'):
 				self.reviewCheckbox.setChecked(True)
 		except:
 			pass
@@ -250,24 +250,42 @@ class MainWindow(QMainWindow,Ui_MainWindow):
 				for tick in BEARPLOT.get_xticklabels():
 					tick.set_rotation(45)
 
-			# Plot data for reviews, Review files start at the end of the flight
+			# Plot data for reviews, Review files may start at the end of the flight, or they may be in the correct order
 			elif(self.reviewCheckbox.isChecked()):
-				ALTPLOT.plot(self.receivedTime-self.receivedTime[-1],self.receivedAlt, 'r-')
-				ALTPLOT.set_ylabel('Altitude (ft)')
-				for tick in ALTPLOT.get_xticklabels():
-					tick.set_rotation(45)
-				LOSPLOT.plot(self.receivedTime-self.receivedTime[-1],self.losLog,'g-')
-				LOSPLOT.set_ylabel('Line-of-Sight (km)')
-				for tick in LOSPLOT.get_xticklabels():
-					tick.set_rotation(45)
-				ELEPLOT.plot(self.receivedTime-self.receivedTime[-1],self.elevationLog, 'b-')
-				ELEPLOT.set_ylabel('Elevation Angle')
-				for tick in ELEPLOT.get_xticklabels():
-					tick.set_rotation(45)
-				BEARPLOT.plot(self.receivedTime-self.receivedTime[-1],self.bearingLog,'y-')
-				BEARPLOT.set_ylabel('Bearing Angle')
-				for tick in BEARPLOT.get_xticklabels():
-					tick.set_rotation(45)
+				if(self.receivedTime[0] - self.receivedTime[-1] > 0):
+					ALTPLOT.plot(self.receivedTime-self.receivedTime[-1],self.receivedAlt, 'r-')
+					ALTPLOT.set_ylabel('Altitude (ft)')
+					for tick in ALTPLOT.get_xticklabels():
+						tick.set_rotation(45)
+					LOSPLOT.plot(self.receivedTime-self.receivedTime[-1],self.losLog,'g-')
+					LOSPLOT.set_ylabel('Line-of-Sight (km)')
+					for tick in LOSPLOT.get_xticklabels():
+						tick.set_rotation(45)
+					ELEPLOT.plot(self.receivedTime-self.receivedTime[-1],self.elevationLog, 'b-')
+					ELEPLOT.set_ylabel('Elevation Angle')
+					for tick in ELEPLOT.get_xticklabels():
+						tick.set_rotation(45)
+					BEARPLOT.plot(self.receivedTime-self.receivedTime[-1],self.bearingLog,'y-')
+					BEARPLOT.set_ylabel('Bearing Angle')
+					for tick in BEARPLOT.get_xticklabels():
+						tick.set_rotation(45)
+				else:
+					ALTPLOT.plot(self.receivedTime-self.receivedTime[0],self.receivedAlt, 'r-')
+					ALTPLOT.set_ylabel('Altitude (ft)')
+					for tick in ALTPLOT.get_xticklabels():			# Rotate the xlabels 45 degrees so they don't overlap
+						tick.set_rotation(45)
+					LOSPLOT.plot(self.receivedTime-self.receivedTime[0],self.losLog,'g-')
+					LOSPLOT.set_ylabel('Line-of-Sight (km)')
+					for tick in LOSPLOT.get_xticklabels():
+						tick.set_rotation(45)
+					ELEPLOT.plot(self.receivedTime-self.receivedTime[0],self.elevationLog, 'b-')
+					ELEPLOT.set_ylabel('Elevation Angle')
+					for tick in ELEPLOT.get_xticklabels():
+						tick.set_rotation(45)
+					BEARPLOT.plot(self.receivedTime-self.receivedTime[0],self.bearingLog,'y-')
+					BEARPLOT.set_ylabel('Bearing Angle')
+					for tick in BEARPLOT.get_xticklabels():
+						tick.set_rotation(45)
 
 			# refresh canvas
 			self.canvas.draw()
@@ -278,15 +296,51 @@ class MainWindow(QMainWindow,Ui_MainWindow):
 	def txtParse(self,line,firstLine):
 		""" 
 		Parses .txt files given, 
-		format IMEI,Time-UTC,Date,Latitude,Longitude,Altitude-meters,Altitude-feet,Vertical Velocity-m/s,Vertical Velocity-ft/s
+		format IMEI,Time-UTC,Date,Latitude,Longitude,Altitude-meters,Altitude-feet,Vertical Velocity-m/s,Vertical Velocity-ft/s if taken from MSU Website
+		format "Date StartTime",TrackingMethod,Time-UTC,Latitude,Longitude,Altitude-feet,bearing,elevationAngle,line-of-sightDistance if from log file
 		"""
 
+		### Log File ###
+		try:
+			if((len(line.split(',')[0].split(' '))) == 2):		# The first item is date and time with a space, not IMEI, so this will work to determine which method this is from
+				# Get the time in seconds
+				line = line.split(',')
+				tempTime = line[2].split(':')
+				gpsTime = float(tempTime[0])*3600 + float(tempTime[1])*60 + float(tempTime[2])
+
+				# Get the lat, lon and alt
+				lat = float(line[3])
+				lon = float(line[4])
+				alt = float(line[5])
+
+				# Calculate the necessary values
+				distance = haversine(self.groundLat, self.groundLon,lat ,lon)
+				bear = bearing(self.groundLat, self.groundLon,lat ,lon)
+				ele = elevationAngle(alt,self.groundAlt, distance)
+				los = math.sqrt(math.pow(distance/3.2808,2) + math.pow((alt-self.groundAlt)/3.2808,2))/1000		# Calculate the line of sight distance
+				
+				# Fill the arrays
+				self.receivedTime = np.append(self.receivedTime,gpsTime)
+				self.receivedLon = np.append(self.receivedLon,lon)
+				self.receivedLat = np.append(self.receivedLat,lat)
+				self.receivedAlt = np.append(self.receivedAlt,alt)
+				self.bearingLog = np.append(self.bearingLog,bear)
+				self.elevationLog = np.append(self.elevationLog,ele)
+				self.losLog = np.append(self.losLog,los)
+
+				self.points.append((lat,lon))		# Add the point to the list of coordinates
+
+				return
+		except:
+			pass
+
+		### Copied from Website ###
 		if not firstLine:		# Skip the header line
 			# Replace commas with spaces, get rid of single quotes, and split on the spaces
 			line = line.replace(',',' ')		# This is because the altitude is given this the format XX,XXX
 			line = line.replace("'",'')
 			line = line.split(' ')
-			
+
 			# Get the time in seconds
 			tempTime = line[1].split(':')
 			gpsTime = float(tempTime[0])*3600 + float(tempTime[1])*60 + float(tempTime[2])
@@ -295,9 +349,11 @@ class MainWindow(QMainWindow,Ui_MainWindow):
 			lon = float(line[4])
 			
 			# Depending on how high the balloon is, the meters column may also be in the format XX,XXX, so you need to check for this
-			if len(line) == 10:
+			if(len(line)) == 9:
+				alt = float(line[6].replace('"',''))
+			if(len(line)) == 10:
 				alt = float((line[6] + line[7]).replace('"',''))
-			else:
+			if(len(line)) == 11:
 				alt = float((line[7] + line[8]).replace('"',''))
 				
 			# Calculate the necessary values
