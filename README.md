@@ -1,7 +1,7 @@
 # Ground-Station-Prediction-and-Review
 ### by Austin Langford
 
-You will need to acquire a [Google Maps Api](https://developers.google.com/maps/documentation/javascript/get-api-key) key to use this software
+You will need to acquire a [Google Maps Api](https://developers.google.com/maps/documentation/javascript/get-api-key) key to use this software. Insert your key on line 38.
 
 Flight predictions compatible with this software come from [CUSF Landing Predictor 2.5](http://predict.habhub.org/). Download the KML file to use with this software.
 
