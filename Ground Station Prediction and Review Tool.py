@@ -35,7 +35,7 @@ from matplotlib.backends.backend_qt4agg import (
     NavigationToolbar2QT as NavigationToolbar)
 from matplotlib.backends import qt4_compat
 
-googleMapsApiKey = 'AIzaSyDxwliW8hKUg072nJcVn3TtWlSEmY9rEvA'			# https://developers.google.com/maps/documentation/javascript/get-api-key
+googleMapsApiKey = ''			# https://developers.google.com/maps/documentation/javascript/get-api-key
 
 class WebView(PyQt4.QtWebKit.QWebPage):
 	""" A class that allows messages from JavaScript being run in a QWebView to be retrieved """
