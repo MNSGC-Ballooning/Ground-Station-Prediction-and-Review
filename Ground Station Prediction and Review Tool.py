@@ -1,41 +1,156 @@
 #################################################################################################################################
-#	   Ground Station Prediction and Review Tool 																				#
-#																																#
-#	   Author:	Austin Langford, AEM, MnSGC																						#
-#	   Based on work from the Montana Space Grant Consortium																	#
-#	   Software created for use by the Minnesota Space Grant Consortium								   							#
-#	   Purpose: To use a ground location, and a flight path to analyze the quality of the ground location 						#
-#	   Handles predictions from predict.habhub.com 																 				#
-#	   Creation Date: June 2016																									#
-#	   Last Edit Date: August 19, 2016																							#
+#       Ground Station Prediction and Review Tool 																				#
+#    																															#
+#       Author:	Austin Langford, AEM, MnSGC																						#
+#       Based on work from the Montana Space Grant Consortium																	#
+#       Software created for use by the Minnesota Space Grant Consortium								   						#
+#       Purpose: To use a ground location, and a flight path to analyze the quality of the ground location 						#
+#       Handles predictions from predict.habhub.com 																 			#
+#       Creation Date: June 2016																								#
+#       Last Edit Date: August 19, 2016																							#
 #################################################################################################################################
 
 from ui_mainwindow import Ui_MainWindow
 import PyQt4
 from PyQt4 import *
+from PyQt4 import QtCore
+from PyQt4.QtCore import QThread
 from PyQt4.QtCore import *
 from PyQt4.QtGui import *
 from PyQt4.QtWebKit import *
 from PyQt4 import QtGui
 import sys
-import os
-import math
-import time
 import numpy as np
 from datetime import *
-import time
-import matplotlib
 import csv
-import urllib2
+import threading
+
+from googleMaps import *
+from PointingMath import *
 
 from matplotlib.figure import Figure
-from matplotlib.backend_bases import key_press_handler
 from matplotlib.backends.backend_qt4agg import (
     FigureCanvasQTAgg as FigureCanvas,
     NavigationToolbar2QT as NavigationToolbar)
-from matplotlib.backends import qt4_compat
 
 googleMapsApiKey = ''			# https://developers.google.com/maps/documentation/javascript/get-api-key
+
+class MyThread(QThread):
+    def run(self):
+        self.exec_()
+
+class GPSLocation:
+
+	def __init__(self, lat, lon):
+		self.lat = lat
+		self.lon = lon
+		self.alt = 900
+
+		self.selected = False
+
+	def getLat(self):
+		return self.lat
+
+	def getLon(self):
+		return self.lon
+
+	def getAlt(self):
+		return self.alt
+
+	def setSelected(self):
+		self.selected = True
+
+	def isSelected(self):
+		return self.selected
+
+
+class Analyzer(QtCore.QObject):
+	""" A class that holds the signals and function for running the location analysis """
+
+	updateLatLst = pyqtSignal(np.ndarray)
+	updateLonLst = pyqtSignal(np.ndarray)
+	updateAltLst = pyqtSignal(np.ndarray)
+	updateResolution = pyqtSignal(float)
+	startAnalysis = pyqtSignal()
+	interruptSignal = pyqtSignal()
+
+	def __init__(self, MainWindow, latLst, lonLst, altLst, resolution):
+		super(Analyzer, self).__init__()
+		self.mainWindow = MainWindow
+		self.latLst = latLst
+		self.lonLst = lonLst
+		self.altLst = altLst
+		self.resolution = resolution
+		self.interrupt = False
+
+		# Slots
+		self.mainWindow.locations.connect(self.mainWindow.analysisFinished)
+		self.mainWindow.progress.connect(self.mainWindow.updateAnalysisProgress)
+
+	def runAnalysis(self):
+		# Prediction
+		self.interrupt = False
+		testLocations = []
+		tempLat = self.latLst[len(self.latLst) / 2] - 1
+		while tempLat <= self.latLst[len(self.latLst) / 2] + 1:
+			tempLon = self.lonLst[len(self.lonLst) / 2] - 1
+			while tempLon <= self.lonLst[len(self.lonLst) / 2] + 1:
+				try:
+					testLoc = GPSLocation(tempLat, tempLon)
+					testLocations.append(testLoc)
+					tempLon = round(tempLon + self.resolution, 4)
+				except:
+					print('Failed, skipping')
+			tempLat = round(tempLat + self.resolution, 4)
+
+		accum = 0
+		progress = 0
+		for each in testLocations:
+			QtGui.QApplication.processEvents()
+			if self.interrupt:
+				break
+			i = 0
+			# eleLst = []
+			losLst = []
+			while i < len(self.latLst) and not self.interrupt:
+				QtGui.QApplication.processEvents()
+				lat = self.latLst[i]
+				lon = self.lonLst[i]
+				alt = self.altLst[i]
+				distance = haversine(each.getLat(), each.getLon(), lat, lon)
+				# ele = elevationAngle(alt, each.getAlt(), distance)
+				los = losDistance(alt, each.getAlt(), distance)
+				# eleLst.append(ele)
+				losLst.append(los)
+				i += 1
+			if sum(losLst) / len(losLst) < 40:
+				each.setSelected()
+			progress += 1
+			self.mainWindow.progress.emit(int(progress), int(len(testLocations)))
+
+		goodSpotCoords = []
+		for each in testLocations:
+			if each.isSelected():
+				accum += 1
+				goodSpotCoords.append(each)
+
+		self.mainWindow.locations.emit(goodSpotCoords)
+
+	def setResolution(self, resolution):
+		self.resolution = resolution
+
+	def setLatLst(self, latLst):
+		self.latLst = latLst
+
+	def setLonLst(self, lonLst):
+		self.lonLst = lonLst
+
+	def setAltLst(self, altLst):
+		self.altLst = altLst
+
+	def setInterrupt(self):
+		self.interrupt = True
+
 
 class WebView(PyQt4.QtWebKit.QWebPage):
 	""" A class that allows messages from JavaScript being run in a QWebView to be retrieved """
@@ -46,20 +161,27 @@ class WebView(PyQt4.QtWebKit.QWebPage):
 		else:
 			print(message)
 
-class Proxy(QtCore.QObject):
+
+class Proxy(PyQt4.QtCore.QObject):
 	""" Helps get the info from the JavaScript to the main window """
 
-	@QtCore.pyqtSlot(float, float)
+	@PyQt4.QtCore.pyqtSlot(float, float)
 	def showLocation(self, latitude, longitude):
 		self.parent().edit.setText('%s, %s' % (latitude, longitude))
-		
+
+
 class MainWindow(QMainWindow,Ui_MainWindow):
 	""" The main GUI window """
+
+	progress = pyqtSignal(int, int)
+	locations = pyqtSignal(list)
 
 	def __init__(self, parent=None):
 		super(MainWindow, self).__init__(parent)
 		self.ui = Ui_MainWindow()			# Set up the GUI window from the file ui_mainwindow.py
 		self.setupUi(self)
+
+		self.dataFile = ''
 
 		# Ground Station information
 		self.groundLat = 0
@@ -69,10 +191,25 @@ class MainWindow(QMainWindow,Ui_MainWindow):
 		# Checkbox booleans
 		self.checkBlocked = False
 
-		# List of Locations
-		self.points = []
+		# Create and start a side thread to run the predictions in
+		self.analysisThread = MyThread()
+		self.analysisThread.start()
 
-		#Graphing Arrays
+		# Create the analyzer and connect the signals
+		self.spotAnalyzer = Analyzer(self, [], [], [], 0.001)
+		self.spotAnalyzer.moveToThread(self.analysisThread)
+		self.spotAnalyzer.updateLatLst.connect(self.spotAnalyzer.setLatLst)
+		self.spotAnalyzer.updateLonLst.connect(self.spotAnalyzer.setLonLst)
+		self.spotAnalyzer.updateAltLst.connect(self.spotAnalyzer.setAltLst)
+		self.spotAnalyzer.updateResolution.connect(self.spotAnalyzer.setResolution)
+		self.spotAnalyzer.startAnalysis.connect(self.spotAnalyzer.runAnalysis)
+		self.spotAnalyzer.interruptSignal.connect(self.spotAnalyzer.setInterrupt)
+
+		# Lists of Locations
+		self.points = []
+		self.goodSpotCoords = []
+
+		# Graphing Arrays
 		self.receivedTime = np.array([])
 		self.receivedLat = np.array([])
 		self.receivedLon = np.array([])
@@ -81,10 +218,12 @@ class MainWindow(QMainWindow,Ui_MainWindow):
 		self.elevationLog = np.array([])
 		self.bearingLog = np.array([])
 
-		#Button Function Link Setup
+		# Button Function Link Setup
 		self.getFile.clicked.connect(self.selectFile)
 		self.reviewCheckbox.stateChanged.connect(lambda: self.checkboxInteractions('review'))
 		self.predictionCheckbox.stateChanged.connect(lambda: self.checkboxInteractions('predict'))
+		self.findSpotsButton.clicked.connect(self.analysisButtonPress)
+		self.analysisRunning = False
 
 		# Map Setup
 		self.mapView = PyQt4.QtWebKit.QWebView(self)
@@ -130,23 +269,64 @@ class MainWindow(QMainWindow,Ui_MainWindow):
 		self.trackerLon.setText(str(self.groundLon))
 
 		# Use Google Maps Api to get the altitude of the latitude and longitude
-		elevation = getAltitude(self.groundLat,self.groundLon)
+		elevation = getAltitude(self.groundLat,self.groundLon, googleMapsApiKey)
 		self.groundAlt = elevation
 		self.trackerAlt.setText(str(self.groundAlt))		# Set the display text
 		self.dragged = True 				# The ground location has been set at least once
 
 		self.makePlots()					# Make the plots when you have all the ground station information
 
+	def updateGroundLocationDisplay(self):
+		self.trackerLat.setText(str(self.groundLat))
+		self.trackerLon.setText(str(self.groundLon))
+		elevation = getAltitude(self.groundLat, self.groundLon, googleMapsApiKey)
+		self.groundAlt = elevation
+		self.trackerAlt.setText(str(self.groundAlt))
+
+	def analysisFinished(self, goodSpots):
+		self.findSpotsButton.setText('Look for Good Locations')
+		self.analysisRunning = False
+		self.goodSpotCoords = goodSpots
+		self.makePlots()
+
+	def updateAnalysisProgress(self, progress, total):
+		percentage = float(progress)/float(total) * 100
+		self.goodSpotProgress.setValue(percentage)
+
+	def analysisButtonPress(self):
+		if not self.analysisRunning:
+			self.analysisRunning = True
+			if not self.resolutionEntryBox.text() == '':
+				resolution = self.resolutionEntryBox.text()
+			else:
+				resolution = self.resolutionEntryBox.placeholderText()
+
+			self.goodSpotProgress.setValue(0)
+			self.spotAnalyzer.updateLatLst.emit(self.receivedLat)
+			self.spotAnalyzer.updateLonLst.emit(self.receivedLon)
+			self.spotAnalyzer.updateAltLst.emit(self.receivedAlt)
+			self.spotAnalyzer.updateResolution.emit(float(resolution))
+			self.spotAnalyzer.startAnalysis.emit()
+
+			self.findSpotsButton.setText('Stop Looking')
+
+		else:
+			self.spotAnalyzer.interruptSignal.emit()
+			self.findSpotsButton.setText('Look for Good Locations')
+			self.analysisRunning = False
+			self.goodSpotProgress.setValue(0)
+			return
+
 	def checkboxInteractions(self,arg):
 		""" Makes sure only one checkbox is checked """
 
-		if(arg == 'review'):
-			if(not self.checkBlocked):
+		if arg == 'review':
+			if not self.checkBlocked:
 				self.checkBlocked = True
 				self.predictionCheckbox.setChecked(False)
 			self.checkBlocked = False
-		if(arg == 'predict'):
-			if(not self.checkBlocked):
+		if arg == 'predict':
+			if not self.checkBlocked:
 				self.checkBlocked = True
 				self.reviewCheckbox.setChecked(False)
 			self.checkBlocked = False
@@ -156,18 +336,15 @@ class MainWindow(QMainWindow,Ui_MainWindow):
 
 		self.dataFile = QFileDialog.getOpenFileName()			# Opens the file browser, the selected file is saved in self.dataFile
 		print(self.dataFile)
-		try:													# Try to determine if this is a prediction or review based on file type
-			if(self.dataFile.split('.')[1] == 'kml'):
-				self.predictionCheckbox.setChecked(True)
-			if(self.dataFile.split('.')[1] == 'csv' or self.dataFile.split('.')[1] == 'txt'):
-				self.reviewCheckbox.setChecked(True)
-		except:
-			pass
+		# Try to determine if this is a prediction or review based on file type
+		if self.dataFile.split('.')[-1] == 'kml':
+			self.predictionCheckbox.setChecked(True)
+		if self.dataFile.split('.')[-1] == 'csv' or self.dataFile.split('.')[-1] == 'txt':
+			self.reviewCheckbox.setChecked(True)
 
 		self.fileLabel.setText(self.dataFile)					# Display the file path
 
 		# Handle the file
-		self.parseFile()
 		self.makePlots()
 		
 	def parseFile(self):
@@ -177,8 +354,7 @@ class MainWindow(QMainWindow,Ui_MainWindow):
 		if self.reviewCheckbox.isChecked():
 			self.points = []		# Reset the coordinates list
 			try:
-				firstLine = True		
-				gpsTime = []		# Make this temporary list
+				firstLine = True
 				if self.dataFile[-3:] == "csv":		# If the file is a .csv file, do the following steps
 					with open(self.dataFile,'r') as csvfile:
 						f = csv.reader(csvfile,delimiter=',')		# Make a csv reader object
@@ -190,18 +366,18 @@ class MainWindow(QMainWindow,Ui_MainWindow):
 					for line in f.readlines():		# Step through each line and run the txtParse function
 						self.txtParse(line,firstLine)
 						firstLine = False		# Handles the header line
-				self.mapView.setHtml(self.html(self.points))
-			except:
-				print("Wrong file format")
+				self.mapView.setHtml(getHTML(self.points, self.groundLat, self.groundLon, self.groundAlt, self.dragged, googleMapsApiKey, self.goodSpotCoords))
+			except Exception, e:
+				print(str(e))
 
 		### Prediction ###
 		elif self.predictionCheckbox.isChecked():		# Path for the prediction
 			self.points = []		# Reset the coordinates list
-			try:
-				self.kmlParse()		# Handle the KML file
-				self.mapView.setHtml(self.html(self.points))	# Setup the map with the new webcode
-			except:
-				print("Wrong file format")
+			# try:
+			self.kmlParse()		# Handle the KML file
+			self.mapView.setHtml(getHTML(self.points, self.groundLat, self.groundLon, self.groundAlt, self.dragged, googleMapsApiKey, self.goodSpotCoords))	# Setup the map with the new webcode
+			# except Exception, e:
+			# 	print(str(e))
 	
 	def makePlots(self):
 		""" Generates the plots based on the file selected and the ground station location """
@@ -232,7 +408,7 @@ class MainWindow(QMainWindow,Ui_MainWindow):
 			BEARPLOT.hold(False)
 			
 			# plot data for predictions
-			if(self.predictionCheckbox.isChecked()):
+			if self.predictionCheckbox.isChecked():
 				ALTPLOT.plot(self.receivedTime-self.receivedTime[0],self.receivedAlt, 'r-')
 				ALTPLOT.set_ylabel('Altitude (ft)')
 				for tick in ALTPLOT.get_xticklabels():			# Rotate the xlabels 45 degrees so they don't overlap
@@ -251,8 +427,8 @@ class MainWindow(QMainWindow,Ui_MainWindow):
 					tick.set_rotation(45)
 
 			# Plot data for reviews, Review files may start at the end of the flight, or they may be in the correct order
-			elif(self.reviewCheckbox.isChecked()):
-				if(self.receivedTime[0] - self.receivedTime[-1] > 0):
+			elif self.reviewCheckbox.isChecked():
+				if self.receivedTime[0] - self.receivedTime[-1] > 0:
 					ALTPLOT.plot(self.receivedTime-self.receivedTime[-1],self.receivedAlt, 'r-')
 					ALTPLOT.set_ylabel('Altitude (ft)')
 					for tick in ALTPLOT.get_xticklabels():
@@ -290,8 +466,8 @@ class MainWindow(QMainWindow,Ui_MainWindow):
 			# refresh canvas
 			self.canvas.draw()
 
-		except:
-			print("Error making plots")
+		except Exception, e:
+			print(str(e))
 		
 	def txtParse(self,line,firstLine):
 		""" 
@@ -302,7 +478,7 @@ class MainWindow(QMainWindow,Ui_MainWindow):
 
 		### Log File ###
 		try:
-			if((len(line.split(',')[0].split(' '))) == 2):		# The first item is date and time with a space, not IMEI, so this will work to determine which method this is from
+			if (len(line.split(',')[0].split(' '))) == 2:		# The first item is date and time with a space, not IMEI, so this will work to determine which method this is from
 				# Get the time in seconds
 				line = line.split(',')
 				tempTime = line[2].split(':')
@@ -317,16 +493,16 @@ class MainWindow(QMainWindow,Ui_MainWindow):
 				distance = haversine(self.groundLat, self.groundLon,lat ,lon)
 				bear = bearing(self.groundLat, self.groundLon,lat ,lon)
 				ele = elevationAngle(alt,self.groundAlt, distance)
-				los = math.sqrt(math.pow(distance/3.2808,2) + math.pow((alt-self.groundAlt)/3.2808,2))/1000		# Calculate the line of sight distance
+				los = losDistance(alt,self.groundAlt,distance)
 				
 				# Fill the arrays
-				self.receivedTime = np.append(self.receivedTime,gpsTime)
-				self.receivedLon = np.append(self.receivedLon,lon)
-				self.receivedLat = np.append(self.receivedLat,lat)
-				self.receivedAlt = np.append(self.receivedAlt,alt)
-				self.bearingLog = np.append(self.bearingLog,bear)
-				self.elevationLog = np.append(self.elevationLog,ele)
-				self.losLog = np.append(self.losLog,los)
+				self.receivedTime = np.append(self.receivedTime, gpsTime)
+				self.receivedLon = np.append(self.receivedLon, lon)
+				self.receivedLat = np.append(self.receivedLat, lat)
+				self.receivedAlt = np.append(self.receivedAlt, alt)
+				self.bearingLog = np.append(self.bearingLog, bear)
+				self.elevationLog = np.append(self.elevationLog, ele)
+				self.losLog = np.append(self.losLog, los)
 
 				self.points.append((lat,lon))		# Add the point to the list of coordinates
 
@@ -334,7 +510,7 @@ class MainWindow(QMainWindow,Ui_MainWindow):
 		except:
 			pass
 
-		### Copied from Website ###
+		### From MSGC Website ###
 		if not firstLine:		# Skip the header line
 			# Replace commas with spaces, get rid of single quotes, and split on the spaces
 			line = line.replace(',',' ')		# This is because the altitude is given this the format XX,XXX
@@ -363,13 +539,13 @@ class MainWindow(QMainWindow,Ui_MainWindow):
 			los = math.sqrt(math.pow(distance/3.2808,2) + math.pow((alt-self.groundAlt)/3.2808,2))/1000		# Calculate the line of sight distance
 			
 			# Fill the arrays
-			self.receivedTime = np.append(self.receivedTime,gpsTime)
-			self.receivedLon = np.append(self.receivedLon,lon)
-			self.receivedLat = np.append(self.receivedLat,lat)
-			self.receivedAlt = np.append(self.receivedAlt,alt)
-			self.bearingLog = np.append(self.bearingLog,bear)
-			self.elevationLog = np.append(self.elevationLog,ele)
-			self.losLog = np.append(self.losLog,los)
+			self.receivedTime = np.append(self.receivedTime, gpsTime)
+			self.receivedLon = np.append(self.receivedLon, lon)
+			self.receivedLat = np.append(self.receivedLat, lat)
+			self.receivedAlt = np.append(self.receivedAlt, alt)
+			self.bearingLog = np.append(self.bearingLog, bear)
+			self.elevationLog = np.append(self.elevationLog, ele)
+			self.losLog = np.append(self.losLog, los)
 
 			self.points.append((lat,lon))		# Add the point to the list of coordinates
 	
@@ -416,14 +592,15 @@ class MainWindow(QMainWindow,Ui_MainWindow):
 		gpsTime = 0
 		descending = False
 		prev = 0
+		firstLine = True
 		for line in f:
-			if(line.find('<description>')!=-1):
-				if(line.find('Ascent rate')!=-1):
+			if line.find('<description>')!=-1:
+				if line.find('Ascent rate')!=-1:
 					self.ascentRate = float(line[line.find('Ascent rate:')+len('Ascent rate:')+1:line.find('m/s')])
 					line = line[line.find('m/s')+len('m/s'):]
 					self.descentRate = float(line[line.find('descent rate:')+len('descent rate:')+1:line.find('m/s')])
 					self.maxAlt = float(line[line.find('burst at')+len('burst at')+1:line.find('m.')])
-			if((len(line.split(',')) == 3) and (line.find('<') == -1)):
+			if (len(line.split(',')) == 3) and (line.find('<') == -1):
 				lineLst = line.split(',')		# Coordinates are delimited by ,
 				lat = float(lineLst[1])
 				lon = float(lineLst[0])		# Make it negative because they come in degrees west
@@ -431,155 +608,90 @@ class MainWindow(QMainWindow,Ui_MainWindow):
 					alt = float(lineLst[2]) * 3.2808		# Convert to feet
 				else:
 					alt = 0
-				if(alt<prev):
+				if alt<prev:
 					descending = True
+
+				if not self.dragged and firstLine:
+					self.groundLat = lat
+					self.groundLon = lon
+					self.updateGroundLocationDisplay()
+
+				firstLine = False
 
 				distance = haversine(self.groundLat, self.groundLon,lat ,lon)
 				bear = bearing(self.groundLat, self.groundLon,lat ,lon)
 				ele = elevationAngle(alt,self.groundAlt,distance)
 				los = math.sqrt(math.pow(distance/3.2808,2) + math.pow((alt-self.groundAlt)/3.2808,2))/1000		# Calculate the line of sight distance
-				if(not descending):
+				if not descending:
 					gpsTime += abs((alt-prev)/3.2808)/self.ascentRate
-				if(descending):
+				if descending:
 					gpsTime += abs((alt-prev)/3.2808)/self.descentRate
 				prev = alt
 
 				# Fill in the graphing arrays
-				self.receivedTime = np.append(self.receivedTime,gpsTime)
-				self.receivedLon = np.append(self.receivedLon,lon)
-				self.receivedLat = np.append(self.receivedLat,lat)
-				self.receivedAlt = np.append(self.receivedAlt,alt)
+				self.receivedTime = np.append(self.receivedTime, gpsTime)
+				self.receivedLon = np.append(self.receivedLon, lon)
+				self.receivedLat = np.append(self.receivedLat, lat)
+				self.receivedAlt = np.append(self.receivedAlt, alt)
 				self.bearingLog = np.append(self.bearingLog,bear)
-				self.elevationLog = np.append(self.elevationLog,ele)
-				self.losLog = np.append(self.losLog,los)
+				self.elevationLog = np.append(self.elevationLog, ele)
+				self.losLog = np.append(self.losLog, los)
 
-				self.points.append((lat,lon))
+				self.points.append((lat, lon))
 
-	def html(self,points):
-		""" Creates an HTML and JavaScript file with the flight path plotted, as well as a draggable marker representing the ground station location """
 
-		### For every point in the list, format it into a string that can be inserted in to the JavaScript function
-		allPoints = ''
-		for each in points:
-			allPoints += '{lat: '+str(each[0])+', lng: '+str(each[1])+'},'
-		allPoints = allPoints[:-1]
+def runPrediction(latLst, lonLst, altLst):
+	# Prediction
+	testLocations = []
+	tempLat = latLst[len(latLst)/2] - abs(latLst[-1] - latLst[0])
+	while tempLat <= latLst[len(latLst)/2] + abs(latLst[-1] - latLst[0]):
+		tempLon = lonLst[len(lonLst)/2] - abs(lonLst[-1] - lonLst[0])
+		while tempLon <= lonLst[len(lonLst)/2] + abs(lonLst[-1] - lonLst[0]):
+			try:
+				testLoc = GPSLocation(tempLat, tempLon)
+				testLocations.append(testLoc)
+				tempLon = round(tempLon + 0.001,4)
+			except:
+				print('Failed, skipping')
+		tempLat = round(tempLat + 0.001,4)
 
-		if(not self.dragged):		# If the marker hasn't been set yet, you need to get a default point, so just use the first coordinate in the list
-			self.groundLat = points[0][0]
-			self.groundLon = points[0][1]
-			# Get the altitude
-			elevation = getAltitude(self.groundLat,self.groundLon)
-			self.groundAlt = float(elevation)
+	accum = 0
+	for each in testLocations:
+		i = 0
+		eleLst = []
+		losLst = []
+		while i < len(latLst):
+			lat = latLst[i]
+			lon = lonLst[i]
+			alt = altLst[i]
+			distance = haversine(each.getLat(), each.getLon(), lat, lon)
+			# ele = elevationAngle(alt, each.getAlt(), distance)
+			los = losDistance(alt, each.getAlt(), distance)
+			# eleLst.append(ele)
+			losLst.append(los)
+			i += 1
+		if sum(losLst) / len(losLst) < 40:
+			each.setSelected()
 
-		### The HTML and JavaScript is a formatted string, this allows for a Google Maps widget ###
-		html = '''
-		<html><head>
-		<meta name="viewport" content="initial-scale=1.0, user-scalable=no" />
-		<style type="text/css">
-		    html { height: 100% }
-		    body { height: 100%; margin: 0; padding: 0 }
-		    #map { width: 100%; height: 100% }
-		</style>
-		</script>
-		        <script async defer
-		        src="https://maps.googleapis.com/maps/api/js?key='''+str(googleMapsApiKey)+'''&callback=initialize">
-		</script>
-		<script type="text/javascript">
-		    var map, marker
-		    function initialize() {
-		        map = new google.maps.Map(document.getElementById("map"), {
-		            center: {lat: '''+str(self.groundLat)+''', lng: '''+str(self.groundLon)+'''},
-		            zoom: 10,
-		            mapTypeId: 'terrain'
-		        })
-		        marker = new google.maps.Marker({
-		            map: map,
-		            position: map.getCenter(),
-		            draggable: true
-		        })
-		        marker.addListener("dragend", function () {
-		            var pos = marker.getPosition()
-		            qt.showLocation(pos.lat(), pos.lng())
-		            console.log("dragend: " + pos.toString())
-		        })
-	            
-	            flightPlanCoordinates = ['''+str(allPoints)+'''];
-				flightPath = new google.maps.Polyline({
-	                map: map,
-	                path: flightPlanCoordinates,
-	                geodesic: true,
-	                strokeColor: '#FF0000',
-	                strokeOpacity: 1.0,
-	                strokeWeight: 2
-	            });
-		    }
-		    google.maps.event.addDomListener(window, "load", initialize)
-		</script>
-		</head>
-		<body><div id="map"/></body>
-		</html>
-		'''
-		return html
-		
-def bearing(groundLat, groundLon, balloonLat, balloonLon):
-	""" Calculates a bearing angle based on GPS coordinates """
+	goodSpotCoords = []
+	for each in testLocations:
+		if each.isSelected():
+			print("Good Locations: ", each.getLat(), each.getLon())
+			accum += 1
+			goodSpotCoords.append(each)
+	print(accum ,' good locations')
 
-	dLat = math.radians(balloonLat-groundLat)	   # delta latitude in radians
-	dLon = math.radians(balloonLon-groundLon)	   # delta longitude in radians
-			
-	y = math.sin(dLon)*math.cos(math.radians(balloonLat))
-	x = math.cos(math.radians(groundLat))*math.sin(math.radians(balloonLat))-math.sin(math.radians(groundLat))*math.cos(math.radians(balloonLat))*math.cos(dLat)
-	tempBearing = math.degrees(math.atan2(y,x))	 # returns the bearing from true north
-	# Get the bearing between 0 and 360
-	if (tempBearing < 0):
-		tempBearing = tempBearing + 360
-	if (tempBearing > 360):
-		tempBearing = tempBearing - 360
-	return tempBearing
+	return goodSpotCoords
 
-def getAltitude(lat,lon):
-	""" Uses the google api to determine the altitude (in feet) of the location by latitude and longitude """
-
-	url = 'https://maps.googleapis.com/maps/api/elevation/json?locations='+str(lat)+','+str(lon)+'&key='+googleMapsApiKey		# Site that returns the elevation of latitude and longitude
-	response = urllib2.urlopen(url)
-	pageTxt = str(response.read())		# Get the text of the page from the URL
-	elevation = pageTxt[pageTxt.find('elevation')+len('elevation')+4:pageTxt.find(',')]		# Parse the text on the page
-	alt = float(elevation)
-
-	return alt*3.2808		# Convert to ft
-
-def elevationAngle(skyAlt, groundAlt, distance):
-	""" Calculates an Elevation Angle based on altitudes and ground (great circle) distance """
-
-	return math.degrees(math.atan2(skyAlt-groundAlt,distance))
-
-def haversine(groundLat, groundLon, balloonLat, balloonLon):
-	""" haversine formula, see: http://www.movable-type.co.uk/scripts/latlong.html, determines ground distance """
-
-	R = 6371		# radius of earth in Km
-
-	dLat = math.radians(balloonLat-groundLat)	   # delta latitude in radians
-	dLon = math.radians(balloonLon-groundLon)	   # delta longitude in radians
-	####################################
-	a = math.sin(dLat/2)*math.sin(dLat/2)+math.cos(math.radians(groundLat))*math.cos(math.radians(balloonLat))*math.sin(dLon/2)*math.sin(dLon/2)
-	#############################
-	c = 2*math.atan2(math.sqrt(a),math.sqrt(1-a))
-	
-	d = R*c
-	
-	return d*3280.839895 # multiply distance in Km by 3280 for feet
-	
 if __name__ == "__main__":
-	#re.sub("[^\d\.]", "", "1,000")
-	app=QtGui.QApplication.instance()		# checks if QApplication already exists 
+
+	app = QtGui.QApplication.instance()		# checks if QApplication already exists
 	if not app:		# create QApplication if it doesnt exist 
 		app = QtGui.QApplication(sys.argv)
+
+	with open('api_key') as f:
+		googleMapsApiKey = f.readline().strip()
 
 	mGui = MainWindow()		# Create the main GUI window
 	mGui.showMaximized()	# Show the GUI maximized (full screen)
 	app.exec_()				# Run the GUI
-
-else:
-	print "Error Booting Gui"
-	while(1):
-		pass
